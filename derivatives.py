@@ -6,7 +6,7 @@ from matplotlib import pyplot as plt
 from typing import *
 from dataclasses import dataclass
 from datetime import datetime
-import dateutil.relativedelta as tdelta
+from dateutil.relativedelta import relativedelta as tdelta
 from enum import Enum
 
 """
@@ -66,12 +66,12 @@ class TimeFrequency(Enum):
     Year = 3
 
 def time2float(td: tdelta, config: TimeFrequency):
-    total = td.total_seconds()
+    total = td.seconds
     match config:
-        case TimeFrequency.Day: return total / tdelta(days=1)
-        case TimeFrequency.Week: return total / tdelta(weeks=1)
-        case TimeFrequency.Month: return total / tdelta(months=1)
-        case TimeFrequency.Year: return total / tdelta(years=1)
+        case TimeFrequency.Day: return td.seconds#total / tdelta(days=1).seconds
+        case TimeFrequency.Week: return td.weeks#total / tdelta(weeks=1).seconds
+        case TimeFrequency.Month: return td.months#total / tdelta(months=1).seconds
+        case TimeFrequency.Year: return td.years#total / tdelta(years=1).seconds
 
 
 """
@@ -85,9 +85,8 @@ def time2float(td: tdelta, config: TimeFrequency):
 class Leg:                      # describes a subcontract of a strategy
     Side : OptionSide
     Type : OptionType
-    Partial: function           # function handle
     Strike:  float              # strike price for the underlying
-    Expiry:  int                # expiration date in years
+    Expiry:  datetime  # expiration date in years
     Riskfree: float             # risk free rate   
     Dividend: float             # continuous dividend rate
     Volatility: float           # standard deviation 
@@ -95,43 +94,60 @@ class Leg:                      # describes a subcontract of a strategy
     Tfreq: TimeFrequency 
     Quantity: int
 
+    def __str__(self) -> str:
+        return f"{self.Side.name} {self.Type.name} @ strike {self.Strike} expiring {self.Expiry}"
+
+def evaluationFunction(Spots, contract: Leg):
+    match contract.Type:
+        case OptionType.Call:
+            # black scholes
+            return LCall(Spots, contract.Strike) if contract.Side == OptionSide.Long else SCall(Spots, contract.Strike)
+        case OptionType.Put:
+            # black scholes
+            return LPut(Spots, contract.Strike) if contract.Side == OptionSide.Long else SPut(Spots, contract.Strike)
+        case OptionType.Forward:
+            # fair value for forward contracts
+            return LForward(Spots, contract.Strike) if contract.Side == OptionSide.Long else SForward(Spots, contract.Strike)
+
 def valuationFunction(duration: float, contract: Leg):
     # extendable valutation function
     bs_args = [contract.Spot, contract.Strike, duration, contract.Riskfree, contract.Dividend, contract.Volatility]
     match contract.Type:
         case OptionType.Call:
             # black scholes
-            return bs_call(*bs_args)
+            return bs_call(*bs_args)* (-1 if contract.Side == OptionSide.Short else 1)
         case OptionType.Put:
             # black scholes
-            return bs_put(*bs_args)
+            return bs_put(*bs_args) *(-1 if contract.Side == OptionSide.Short else 1)
         case OptionType.Forward:
             # fair value for forward contracts
-            return contract.Spot / np.exp(duration)
+            return contract.Spot * np.exp(duration*(contract.Riskfree-contract.Dividend))
 
 class OptionStrategy(object):
 
-    def __init__(self,current_date: datetime,  Derivatives: List[Leg], spot_max = 750):
+    def __init__(self,current_date: datetime,  derivatives: List[Leg]):
         self.current_date = current_date
+        spot_max = int(derivatives[0].Strike *3)
         self.Spots = np.linspace(0,spot_max, 100*spot_max)
-        self.Derivatives = Derivatives
+        self.Derivatives = derivatives
         self.Parts  = List[Dict]
         self.payoff = np.zeros(self.Spots.shape)
         self.valuation = 0
+
     def eval(self):
-        self.Parts.clear()          # clear old evaluations
+        self.Parts = list()    # clear old evaluations
         for derivative in self.Derivatives:     
-            time = time2float(tdelta(self.current_date, derivative.Expiry), derivative.Tfreq)   # convert to time float
+            time = time2float(tdelta(derivative.Expiry,self.current_date), derivative.Tfreq)   # convert to time float
             # easy unpack in the "bsvalue" key
             self.Parts.append(
                 {
                 "Leg": derivative,
-                "payoff": derivative.function(self.Spots),
-                "bsvalue": valuationFunction(time, derivative)
+                "payoff": evaluationFunction(self.Spots, derivative),
+                "value": valuationFunction(time, derivative)
                 }
             )
-        self.payoff = np.sum([component["payoff"]*component["Quantity"] for component in self.Parts])
-        self.valuation = np.sum([component["bsvalue"]*component["Leg"].Quantity*(-1 if component["Leg"].OptionSide == OptionSide.Long else 1) \
+        self.payoff = np.sum([component["payoff"]*component["Leg"].Quantity for component in self.Parts], axis=0)
+        self.valuation = np.sum([component["value"]*component["Leg"].Quantity*(-1 if component["Leg"].Side == OptionSide.Long else 1) \
              for component in self.Parts])
 
     def changeFieldAndReEval(self, field, value):
@@ -148,10 +164,26 @@ class OptionStrategy(object):
         return {
             "parts": self.Parts,
             "payoff": self.payoff,
-            "valuations": self.valuation
+            "valuation": self.valuation
         }
 
-    
+    def __str__(self):
+        return "\n".join(["Strategy Composition"] + [
+            f"{p['Leg']} ${round(p['value'],2)}" for p in self.Parts
+        ])
+
+    def plot(self):
+        fig, ax = plt.subplots()
+        legends = ["OptionStrategy", "min", "max"]
+        ax.plot(self.Spots, self.payoff)
+        ax.plot(self.Spots[self.payoff == np.min(self.payoff)], self.payoff[self.payoff == np.min(self.payoff)])
+        ax.plot(self.Spots[self.payoff == np.max(self.payoff)], self.payoff[self.payoff == np.max(self.payoff)])
+        for part in self.Parts:
+            ax.plot(self.Spots, part["payoff"])
+            legends.append(str(part["Leg"]))
+        fig.legend(legends)
+        plt.show()
+
 
 
         
